@@ -38,7 +38,7 @@ float measureDistance() {
 }
 
 void loop() {
-  if (millis() - lastTime >= 500) {
+  if (millis() - lastTime >= 10000) { // Measure every 10 seconds
     lastTime = millis();
     
     distance = measureDistance();
