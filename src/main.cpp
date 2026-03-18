@@ -1,4 +1,7 @@
 #include <Arduino.h>
+#include <ESP8266WiFi.h>
+#include <ESP8266HTTPClient.h>
+#include <WiFiClient.h>
 
 // HC-SR04 Pins
 #define TRIG_PIN D1  // GPIO13 - Trigger
@@ -6,17 +9,56 @@
 // Float switch pin
 #define FLOAT_SWITCH_PIN D5  // GPIO14 - Float switch (D0/GPIO16 does not support INPUT_PULLUP)
 
+// ---- WiFi Config ----
+const char* WIFI_SSID     = "JjA15";
+const char* WIFI_PASSWORD = "112075oratej";
+const char* BACKEND_URL   = "http://your-backend.com/api/sensor"; // Change this to your backend
+// ---------------------
+
 float distance = 0;
 unsigned long lastTime = 0;
 
-void setup() {
-  Serial.begin(74880);
-  delay(1000);
-  
-  pinMode(TRIG_PIN, OUTPUT);
-  pinMode(ECHO_PIN, INPUT);
-  digitalWrite(TRIG_PIN, LOW);
-  pinMode(FLOAT_SWITCH_PIN, INPUT_PULLUP); // Internal pull-up: LOW = switch closed, HIGH = switch open
+void connectWiFi() {
+  Serial.print("Connecting to WiFi");
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println();
+  Serial.print("Connected! IP: ");
+  Serial.println(WiFi.localIP());
+}
+
+void sendData(float dist, bool isHigh) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi disconnected!");
+    return;
+  }
+
+  WiFiClient client;
+  HTTPClient http;
+
+  http.begin(client, BACKEND_URL);
+  http.addHeader("Content-Type", "application/json");
+
+  String payload = "{\"distance\":" + String(dist, 1) +
+                   ",\"water_level\":\"" + (isHigh ? "HIGH" : "LOW") + "\"}");
+
+  int httpCode = http.POST(payload);
+
+  if (httpCode > 0) {
+    Serial.print("HTTP Response: ");
+    Serial.println(httpCode);
+    if (httpCode == HTTP_CODE_OK) {
+      Serial.println("Data sent successfully!");
+    }
+  } else {
+    Serial.print("HTTP failed: ");
+    Serial.println(http.errorToString(httpCode));
+  }
+
+  http.end();
 }
 
 float measureDistance() {
@@ -37,8 +79,20 @@ float measureDistance() {
   return dist;
 }
 
+void setup() {
+  Serial.begin(74880);
+  delay(1000);
+  
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  digitalWrite(TRIG_PIN, LOW);
+  pinMode(FLOAT_SWITCH_PIN, INPUT_PULLUP); // Internal pull-up: LOW = switch closed, HIGH = switch open
+
+  connectWiFi();
+}
+
 void loop() {
-  if (millis() - lastTime >= 1000) { // Measure every 1 seconds
+  if (millis() - lastTime >= 10000) { // Measure every 10 seconds
     lastTime = millis();
     
     distance = measureDistance();
@@ -49,11 +103,24 @@ void loop() {
     
     // Float switch sensor reading (INPUT_PULLUP: LOW = closed/HIGH water, HIGH = open/LOW water)
     int sensorState = digitalRead(FLOAT_SWITCH_PIN);
-    if (sensorState == LOW) {
+    bool waterHigh = (sensorState == LOW);
+    if (waterHigh) {
       Serial.println("Water level: HIGH (Switch Closed)");
     } else {
       Serial.println("Water level: LOW (Switch Open)");
     }
+
+    // WiFi status check
+    Serial.print("WiFi: ");
+    Serial.println(WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected");
+    
+    // Send data to backend
+    sendData(distance, waterHigh);
+    Serial.println("---");
+  }
+}
+    Serial.print("WiFi: ");
+    Serial.println(WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected");
   }
 }
 
