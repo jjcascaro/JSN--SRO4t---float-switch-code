@@ -1,7 +1,8 @@
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
-#include <ESP8266HTTPClient.h>
-#include <WiFiClient.h>
+// #include <ESP8266HTTPClient.h>  // Uncomment when backend is ready
+// #include <WiFiClient.h>         // Uncomment when backend is ready
+#include <time.h>
 
 // HC-SR04 Pins
 #define TRIG_PIN D1  // GPIO13 - Trigger
@@ -12,7 +13,7 @@
 // ---- WiFi Config ----
 const char* WIFI_SSID     = "JjA15";
 const char* WIFI_PASSWORD = "112075oratej";
-const char* BACKEND_URL   = "http://your-backend.com/api/sensor"; // Change this to your backend
+// const char* BACKEND_URL = "http://192.168.1.100:3000/api/sensor"; // Uncomment when backend is ready
 // ---------------------
 
 float distance = 0;
@@ -28,38 +29,66 @@ void connectWiFi() {
   Serial.println();
   Serial.print("Connected! IP: ");
   Serial.println(WiFi.localIP());
+
+  // Sync time via NTP (UTC+8 for Philippines = 28800 seconds offset)
+  configTime(28800, 0, "pool.ntp.org");
+  Serial.print("Syncing time");
+  time_t now = time(nullptr);
+  while (now < 24 * 3600) {
+    delay(500);
+    Serial.print(".");
+    now = time(nullptr);
+  }
+  Serial.println("\nTime synced!");
 }
 
+/*  -- Uncomment when backend is ready --
 void sendData(float dist, bool isHigh) {
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi disconnected!");
+    Serial.println("ERROR: WiFi not connected!");
     return;
   }
 
   WiFiClient client;
   HTTPClient http;
 
-  http.begin(client, BACKEND_URL);
+  // Start HTTP connection
+  if (!http.begin(client, BACKEND_URL)) {
+    Serial.println("ERROR: Failed to connect to backend");
+    return;
+  }
+
+  // Set header
   http.addHeader("Content-Type", "application/json");
 
-  String payload = "{\"distance\":" + String(dist, 1) +
-                   ",\"water_level\":\"" + (isHigh ? "HIGH" : "LOW") + "\"}");
+  // Create JSON string
+  // Example: {"distance":23.5,"water_level":"HIGH"}
+  String jsonData = "{\"distance\":" + String(dist, 1) + 
+                    ",\"water_level\":\"" + (isHigh ? "HIGH" : "LOW") + "\"}";
 
-  int httpCode = http.POST(payload);
+  Serial.print("Sending JSON: ");
+  Serial.println(jsonData);
+
+  // Send POST request
+  int httpCode = http.POST(jsonData);
 
   if (httpCode > 0) {
-    Serial.print("HTTP Response: ");
+    Serial.print("HTTP Status: ");
     Serial.println(httpCode);
-    if (httpCode == HTTP_CODE_OK) {
-      Serial.println("Data sent successfully!");
+    
+    if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_CREATED) {
+      String response = http.getString();
+      Serial.print("Response: ");
+      Serial.println(response);
     }
   } else {
-    Serial.print("HTTP failed: ");
+    Serial.print("HTTP Error: ");
     Serial.println(http.errorToString(httpCode));
   }
 
   http.end();
 }
+*/
 
 float measureDistance() {
   // Send 10µs pulse to trigger
@@ -94,6 +123,14 @@ void setup() {
 void loop() {
   if (millis() - lastTime >= 10000) { // Measure every 10 seconds
     lastTime = millis();
+
+    // Get current date and time
+    time_t now = time(nullptr);
+    struct tm* timeinfo = localtime(&now);
+    char timestamp[25];
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", timeinfo);
+    Serial.print("[Time] ");
+    Serial.println(timestamp);
     
     distance = measureDistance();
     
@@ -115,12 +152,8 @@ void loop() {
     Serial.println(WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected");
     
     // Send data to backend
-    sendData(distance, waterHigh);
+    // sendData(distance, waterHigh); // Commented out - uncomment when backend is ready
     Serial.println("---");
-  }
-}
-    Serial.print("WiFi: ");
-    Serial.println(WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected");
   }
 }
 
