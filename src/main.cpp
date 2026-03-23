@@ -1,20 +1,33 @@
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <WiFiClient.h>
 #include <time.h>
 #include "secrets.h"
 
-// HC-SR04 Pins
-#define TRIG_PIN D1  // GPIO13 - Trigger
-#define ECHO_PIN D2  // GPIO15 - Echo
-// Float switch pin
-#define FLOAT_SWITCH_PIN D5  // GPIO14 - Float switch (D0/GPIO16 does not support INPUT_PULLUP)
+// ===== ENVIRONMENT CONFIGURATION =====
+#define USE_PRODUCTION 1  // Set to 1 for HTTPS, 0 for HTTP (local testing)
 
-const int FLOOD_SENSOR_ID = 1; // PK of the FloodSensor record in Django admin (api/flood-sensors/1/)
+// ===== SENSOR PINS =====
+#define TRIG_PIN D1              // GPIO5  - Ultrasonic trigger
+#define ECHO_PIN D2              // GPIO4  - Ultrasonic echo
+#define FLOAT_SWITCH_PIN D5      // GPIO14 - Float switch
+
+// ===== DEVICE FINGERPRINTING =====
+#define DEVICE_TYPE "ESP8266-JSN-SRO4T-FloatSwitch"
+#define FIRMWARE_VERSION "1.0.0"
 
 float distance = 0;
 unsigned long lastTime = 0;
+
+String getDeviceMAC() {
+  return WiFi.macAddress();
+}
+
+String generateRequestID() {
+  return String(millis()) + "-" + String(random(1000, 9999));
+}
 
 void connectWiFi() {
   Serial.print("Connecting to WiFi");
@@ -39,42 +52,53 @@ void connectWiFi() {
   Serial.println("\nTime synced!");
 }
 
-void sendData(float dist, bool isHigh) {
+String getISO8601Timestamp() {
+  time_t now = time(nullptr);
+  struct tm* timeinfo = localtime(&now);
+  char timestamp[30];
+  strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S", timeinfo);
+  return String(timestamp) + "+08:00";
+}
+
+void sendData(float waterLevel, bool floatSwitchTriggered) {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("ERROR: WiFi not connected!");
     return;
   }
 
-  WiFiClient client;
+#if USE_PRODUCTION
+  BearSSL::X509List cert(ISRG_E7_CERT);
+  WiFiClientSecure client;
+  client.setTrustAnchors(&cert);
   HTTPClient http;
-
-  // Start HTTP connection
   if (!http.begin(client, BACKEND_URL)) {
-    Serial.println("ERROR: Failed to connect to backend");
+    Serial.println("ERROR: Failed to initialize HTTPS connection");
     return;
   }
+#else
+  WiFiClient client;
+  HTTPClient http;
+  if (!http.begin(client, BACKEND_URL)) {
+    Serial.println("ERROR: Failed to initialize HTTP connection");
+    return;
+  }
+#endif
 
-  // Set header
   http.addHeader("Content-Type", "application/json");
   http.addHeader("X-Device-API-Key", API_KEY);
+  http.addHeader("X-Device-Type", DEVICE_TYPE);
+  http.addHeader("X-Firmware-Version", FIRMWARE_VERSION);
+  http.addHeader("X-Device-MAC", getDeviceMAC());
+  http.addHeader("X-Request-ID", generateRequestID());
+  http.addHeader("User-Agent", "ESP8266-FloodSensor/1.0");
 
-  // Get timestamp
-  time_t now = time(nullptr);
-  struct tm* timeinfo = localtime(&now);
-  char timestamp[25];
-  strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S", timeinfo);
-
-  // Create JSON string — matches FloodSensorReadingSerializer fields
-  // flood_sensor = integer PK of the FloodSensor record in Django
-  // device_timestamp = optional ISO-style timestamp reported by the device
-  String jsonData = "{\"flood_sensor\":" + String(FLOOD_SENSOR_ID)
-                    + ",\"water_level\":" + String(dist, 1)
-                    + ",\"device_timestamp\":\"" + String(timestamp) + "\"}";
+  String jsonData = "{\"water_level\":" + String(waterLevel, 2)
+                    + ",\"float_switch\":" + String(floatSwitchTriggered ? 1 : 0)
+                    + ",\"device_timestamp\":\"" + getISO8601Timestamp() + "\"}";
 
   Serial.print("Sending JSON: ");
   Serial.println(jsonData);
 
-  // Send POST request
   int httpCode = http.POST(jsonData);
 
   if (httpCode > 0) {
@@ -85,49 +109,17 @@ void sendData(float dist, bool isHigh) {
       Serial.print("Response: ");
       Serial.println(response);
     }
-    // --- Diagnostics ---
+
     if (httpCode == 201 || httpCode == 200) {
-      Serial.println("[OK] Data saved successfully.");
-    } else if (httpCode == 400) {
-      Serial.println("[ERROR 400] Bad Request — Django rejected the data.");
-      Serial.println("  Check: field names match serializer (flood_sensor, water_level, device_timestamp)");
-      Serial.println("  Check: flood_sensor ID exists in Django admin");
-      Serial.println("  Check: timestamp format is correct (YYYY-MM-DDTHH:MM:SS)");
+      Serial.println("[OK] Data queued successfully.");
     } else if (httpCode == 401) {
-      Serial.println("[ERROR 401] Unauthorized — API key is missing or wrong.");
-      Serial.println("  Check: API_KEY value matches what is stored in Django");
-    } else if (httpCode == 403) {
-      Serial.println("[ERROR 403] Forbidden — API key was rejected by the server.");
-      Serial.println("  Check: The sensor device is registered and active in Django admin");
-    } else if (httpCode == 404) {
-      Serial.println("[ERROR 404] URL not found — BACKEND_URL is wrong.");
-      Serial.println("  Check: BACKEND_URL path is correct");
-    } else if (httpCode == 500) {
-      Serial.println("[ERROR 500] Server crashed — check Django server terminal for traceback.");
-    } else {
-      Serial.print("[WARN] Unhandled status code: ");
-      Serial.println(httpCode);
+      Serial.println("[ERROR 401] Unauthorized — API key invalid.");
+    } else if (httpCode == 429) {
+      Serial.println("[ERROR 429] Rate Limited — too many requests.");
     }
   } else {
-    Serial.print("HTTP Error code: ");
-    Serial.println(httpCode);
-    Serial.print("HTTP Error string: ");
+    Serial.print("[ERROR] HTTP Error: ");
     Serial.println(http.errorToString(httpCode));
-    // --- Diagnostics ---
-    if (httpCode == HTTPC_ERROR_CONNECTION_REFUSED) {
-      Serial.println("[ERROR] Connection refused — server not running or wrong IP/port.");
-      Serial.println("  Check: Django server is running (python manage.py runserver 0.0.0.0:8000)");
-      Serial.print("  Check: PC IP is still "); Serial.println(BACKEND_URL);
-      Serial.println("  Fix: Run 'ipconfig' on your PC and update BACKEND_URL if IP changed");
-    } else if (httpCode == HTTPC_ERROR_READ_TIMEOUT) {
-      Serial.println("[ERROR] Timeout — server connected but did not respond in time.");
-      Serial.println("  Check: Django server is not frozen or overloaded");
-    } else if (httpCode == HTTPC_ERROR_NOT_CONNECTED) {
-      Serial.println("[ERROR] Not connected — WiFi dropped before sending.");
-    } else {
-      Serial.print("  WiFi status: ");
-      Serial.println(WiFi.status());
-    }
   }
 
   http.end();
@@ -135,69 +127,60 @@ void sendData(float dist, bool isHigh) {
 
 
 float measureDistance() {
-  // Send 10µs pulse to trigger
   digitalWrite(TRIG_PIN, LOW);
   delayMicroseconds(2);
   digitalWrite(TRIG_PIN, HIGH);
   delayMicroseconds(10);
   digitalWrite(TRIG_PIN, LOW);
-  
-  // Measure echo pulse width
-  long duration = pulseIn(ECHO_PIN, HIGH, 30000);  // max 30ms timeout
-  
-  // Calculate distance: (duration / 2) / 29.1
-  // 29.1 microseconds per cm (speed of sound)
+
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000);
   float dist = (duration / 2.0) / 29.1;
-  
+
   return dist;
 }
 
 void setup() {
   Serial.begin(74880);
   delay(1000);
-  
+
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
   digitalWrite(TRIG_PIN, LOW);
-  pinMode(FLOAT_SWITCH_PIN, INPUT_PULLUP); // Internal pull-up: LOW = switch closed, HIGH = switch open
+  pinMode(FLOAT_SWITCH_PIN, INPUT_PULLUP);
+
+  Serial.println("\n\n=== FLOOD SENSOR STARTING ===");
+  Serial.println("Firmware: " FIRMWARE_VERSION);
+  Serial.print("Mode: ");
+  Serial.println(USE_PRODUCTION ? "PRODUCTION (HTTPS)" : "LOCAL (HTTP)");
+  Serial.println("==============================\n");
 
   connectWiFi();
+  randomSeed(micros());  // Seed RNG after WiFi/NTP delays for better entropy
 }
 
 void loop() {
-  if (millis() - lastTime >= 10000) { // Measure every 10 seconds
+  if (millis() - lastTime >= 10000) {
     lastTime = millis();
 
-    // Get current date and time
-    time_t now = time(nullptr);
-    struct tm* timeinfo = localtime(&now);
-    char timestamp[25];
-    strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S", timeinfo);
-    Serial.print("[Time] ");
-    Serial.println(timestamp);
-    
+    Serial.print("[");
+    Serial.print(getISO8601Timestamp());
+    Serial.println("]");
+
     distance = measureDistance();
-    
     Serial.print("Distance: ");
     Serial.print(distance, 1);
     Serial.println(" cm");
-    
-    // Float switch sensor reading (INPUT_PULLUP: LOW = closed/HIGH water, HIGH = open/LOW water)
-    int sensorState = digitalRead(FLOAT_SWITCH_PIN);
-    bool waterHigh = (sensorState == LOW);
-    if (waterHigh) {
-      Serial.println("Water level: HIGH (Switch Closed)");
-    } else {
-      Serial.println("Water level: LOW (Switch Open)");
-    }
 
-    // WiFi status check
+    // INPUT_PULLUP: LOW = switch closed (water high), HIGH = switch open (water low)
+    int sensorState = digitalRead(FLOAT_SWITCH_PIN);
+    bool floatTriggered = (sensorState == LOW);
+    Serial.println(floatTriggered ? "Float: TRIGGERED" : "Float: NORMAL");
+
     Serial.print("WiFi: ");
-    Serial.println(WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected");
-    
-    // Send data to backend
-    sendData(distance, waterHigh);
-    Serial.println("---");
+    Serial.println(WiFi.status() == WL_CONNECTED ? "OK" : "DISCONNECTED");
+
+    sendData(distance, floatTriggered);
+    Serial.println("---\n");
   }
 }
 
