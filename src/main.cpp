@@ -92,7 +92,7 @@ void sendData(float waterLevel, bool floatSwitchTriggered) {
   http.addHeader("X-Request-ID", generateRequestID());
   http.addHeader("User-Agent", "ESP8266-FloodSensor/1.0");
 
-  String jsonData = "{\"water_level\":" + String(waterLevel, 2)
+  String jsonData = "{\"distance_cm\":" + String(waterLevel, 2)
                     + ",\"float_switch\":" + String(floatSwitchTriggered ? 1 : 0)
                     + ",\"device_timestamp\":\"" + getISO8601Timestamp() + "\"}";
 
@@ -181,6 +181,10 @@ void loop() {
 
     sendData(distance, floatTriggered);
     Serial.println("---\n");
+
+    Serial.flush();
+    sendData(distance, floatTriggered);  // Retry immediately to test error handling
+    
   }
 }
 
